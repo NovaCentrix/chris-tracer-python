@@ -8,18 +8,36 @@ import ad8403
 import utime
 import tracer
 
-# Initialize the screen
+
+def display_resistances_update(disp, pots):
+  """Update resistance values on screen."""
+  disp.fill(0)
+  disp.text("R1=", 2,2)
+  disp.text(str(int(pots[0].Rcombine()[0]+0.5)), 32,2)
+  disp.text("R2=", 2,15)
+  disp.text(str(int(pots[1].Rcombine()[0]+0.5)), 32,15)
+  disp.show()
+
+def display_splash_screen(disp):
+  """Welcome screen."""
+  disp.text("Welcome to", 2,1)
+  disp.text("to the", 2,11)
+  disp.text("TraceR", 2,21)
+  disp.show()
+
 i2c = I2C(0, scl=Pin(1), sda=Pin(0))
 disp = ssd1306.SSD1306_I2C(64, 32, i2c)
-disp.text("Welcome to", 2,2)
-disp.text("the TraceR", 2,10)
-disp.show()
+
 
 # initialize the Digipot chain
 r1 = ad8403.Digipot()
 r2 = ad8403.Digipot()
 pots = [ r1, r2 ]
 chain = ad8403.Digichain(digipots=pots)
+
+display_splash_screen(disp)
+utime.sleep(3) # wait three seconds
+display_resistances_update(disp, pots)
 
 # start serial console
 echo = True
@@ -61,19 +79,7 @@ while running:
         print( cmd, int(val))
         rpot.counts(int(val))
         errs, checks = chain.send()
-        # update display
-        disp.fill(0)
-        if rpot == r1:
-          disp.text("R1=", 2,2)
-          disp.text(str(int(val)), 32,2)
-          disp.text("R2=", 2,15)
-          disp.text(str(r2.vals[0]), 32,15)
-        if rpot == r2:
-          disp.text("R1=", 2,2)
-          disp.text(str(r1.vals[0]), 32,2)
-          disp.text("R2=", 2,15)
-          disp.text(str(int(val)), 32,15)
-        disp.show()
+        display_resistances_update(disp, pots)
         state=state_CMD # start all over
 
 
