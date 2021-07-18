@@ -1,80 +1,112 @@
 from machine import I2C, SPI, Pin, Signal
 import ssd1306
-import ad840x
 import utime
+import ad8403
+
+# Shunting Relays
+# K1 shorts Digipot R1, K2 shorts R2
+class Relay:
+  def __init__(self, pinnum):
+    self.pinnum = pinnum
+    self.pin = Pin(self.pinnum, Pin.OUT, value=0) 
+    self.sig = Signal(self.pin, invert=False)
+
+  def shunt(self):
+    self.sig.value(True)
+        
+  def open(self):
+    self.sig.value(False)
+
+  def set(self, value):
+    self.sig.value(value)
+
+  def get(self):
+    return self.sig.value() == 1
+        
+  def get_string(self):
+    if self.sig.value(): return 'shunt'
+    else: return 'open'
 
 class TraceR:
 
   def __init__(self):
 
-    # === Display ===
-    # Note: could make this a class unto itself,
-    # if this TraceR class becomes too cluttered
     self.i2c = I2C(0, scl=Pin(1), sda=Pin(0))
     self.disp = ssd1306.SSD1306_I2C(64, 32, self.i2c)
-    self.disp.text("Welcome", 2,1)
-    self.disp.text("to the", 2,11)
-    self.disp.text("TraceR", 2,21)
-    self.disp.show()
+
+    # initialize the Digipot chain
+    self.r1 = ad8403.Digipot()
+    self.r2 = ad8403.Digipot()
+    self.pots = [ self.r1, self.r2 ]
+    self.chain = ad8403.Digichain(digipots=self.pots)
+    
     # pixel offsets for the each of the text rows and data fields
     # from above, this display is 32 pixels tall x 64 pixels wide
     self.disp_rows = [2, 15]
     self.disp_tabs = [2, 32]
 
-    # === Digipots ===
-    # R1 is on the MCU side of the board
-    # R2 is on the Display side of the board
-    self.pot = ad840x.Digipot()
-    self.pot.counts(0xc0, 0)
-    self.pot.counts(0x40, 1)
-    self.pot.send()
+    # === Shunting Relays ===
+
+class TraceR:
+
+  def __init__(self):
+
+    self.i2c = I2C(0, scl=Pin(1), sda=Pin(0))
+    self.disp = ssd1306.SSD1306_I2C(64, 32, self.i2c)
+
+    # initialize the Digipot chain
+    self.r1 = ad8403.Digipot()
+    self.r2 = ad8403.Digipot()
+    self.pots = [ self.r1, self.r2 ]
+    self.chain = ad8403.Digichain(digipots=self.pots)
+    
+    # pixel offsets for the each of the text rows and data fields
+    # from above, this display is 32 pixels tall x 64 pixels wide
+    self.disp_rows = [2, 15]
+    self.disp_tabs = [2, 32]
 
     # === Shunting Relays ===
     # K1 shorts Digipot R1, K2 shorts R2
-    self.relay1_pin = Pin(29, Pin.OUT, value=0) 
-    self.relay1 = Signal(self.relay1_pin, invert=False)
-    self.relay2_pin = Pin(28, Pin.OUT, value=0) 
-    self.relay2 = Signal(self.relay2_pin, invert=False)
+    self.k1 = Relay(29)
+    self.k2 = Relay(28)
+    self.relays = [self.k1, self.k2]
 
-  def short(self, channel):
-    if channel == 0:
-        self.relay1.value(True)
-    if channel == 1:
-        self.relay2.value(True)
-        
-  def open(self, channel):
-    if channel == 0:
-        self.relay1.value(False)
-    if channel == 1:
-        self.relay2.value(False)
-        
+  def display_resistances_update(self):
+    """Update resistance values on screen."""
+    r1str = str(int(self.r1.Rcombine()[0]+0.5))
+    r2str = str(int(self.r2.Rcombine()[0]+0.5))
+    self.disp.fill(0)
+    self.disp.text("R1=", self.disp_tabs[0], self.disp_rows[0])
+    self.disp.text(r1str, self.disp_tabs[1], self.disp_rows[0])
+    self.disp.text("R2=", self.disp_tabs[0], self.disp_rows[1])
+    self.disp.text(r2str, self.disp_tabs[1], self.disp_rows[1])
+    self.disp.show()
+  
+  def display_counts_update(self):
+    """Update digipot counts values on screen."""
+    # NOTE: current all counts are the same
+    # so fetching val[0] is representative of the pot
+    r1str = str(self.r1.vals[0])
+    r2str = str(self.r2.vals[1])
+    if self.k1.get(): r1str+='*'
+    if self.k2.get(): r2str+='*'
+    self.disp.fill(0)
+    self.disp.text("X1=", self.disp_tabs[0], self.disp_rows[0])
+    self.disp.text(r1str, self.disp_tabs[1], self.disp_rows[0])
+    self.disp.text("X2=", self.disp_tabs[0], self.disp_rows[1])
+    self.disp.text(r2str, self.disp_tabs[1], self.disp_rows[1])
+    self.disp.show()
+  
+  def display_splash_screen(self):
+    """Welcome screen."""
+    self.disp.text("Welcome to", 2,1)
+    self.disp.text("to the", 2,11)
+    self.disp.text("TraceR", 2,21)
+    self.disp.show()
 
-
-
-# pot.ohms(0,0xc0)
-# pot.ohms(1,0x40)
-# pot.send()
-# 
-# disp.fill(0)
-# disp.text("R1=", 2,2)
-# disp.text(str(100), 32,2)
-# disp.text("R2=", 2,15)
-# disp.text(str(220), 32,15)
-# disp.show()
-# 
-# #for _ in range(1000):
-# #    pot.set_ohms(0, 128)
-# #    pot.set_ohms(1, 128)
-# #    pot.set_ohms(2, 128)
-# #    pot.set_ohms(3, 128)
-# 
-# pot.show_status()
-# 
-# # for i in range(100):
-# #   print(i)
-# #   disp.fill(0)
-# #   disp.text(str(i), 2,2)
-# #   disp.show()
-# #   sr.send_int(i)
-# #   utime.sleep_ms(1000)
+def testme():
+  tr = TraceR()
+  tr.display_splash_screen()
+  utime.sleep(3) # wait three seconds
+  tr.display_resistances_update()
 
