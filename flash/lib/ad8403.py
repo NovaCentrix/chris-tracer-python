@@ -1,99 +1,23 @@
-""" Analog Devices AD840x Digipot Class
-
-This module is used to write to a one or more Analog Devices
-AD840x Digipots over SPI. If more than one Digipot, they are
-connected in a daisy chain as described in the datasheet.
-
-
-Each Digipot has one 10-bit register, composed as follows:
-  * 2-bits Address, [ A1, A0 ]  b9 -- b8
-  * 8-bits Data,  [ D7 -- D0 ]  b7 -- b0
-  * serially send MSB first
-
-## Control pins
-
-Although other connections might be possible, this module 
-assumes that the control signals are tied together.
-
-  /SHDN   Shutdown, Rwa open, Rwb shorted
-  /RS     Reset all wipers to 0x80 counts
-  /SS     Chip Select
-
-## Note about SPI communications with Digipots
-
-Due to some limitations of the SPI implementation in Micropython,
-especially for the RP2 (and others?), it's not straightforward to send
-an arbitrary number of bits, such as 10 or 20. Instead of wrestling with
-the SPI driver to make it work correctly for 10 or 20 bits, we will send
-an integer number of bytes and just throw away any remainders. In the
-case of talking to one Digipot two bytes are send -- three digipots, 3
-bytes, etc.
-
-  * 6 dummy bits +   10 bits  ==  2 bytes (one digipot)
-  * 4 dummy bits + 2*10 bits  ==  3 bytes (two digipots)
-
-The code down below in function Digichain.send() used to transmit 
-wiper data over SPI requires some explanation.
-
-* This family of Digipot has no provision to read back the wiper
-  settings. The best we can do is to confirm the command we send
-  is properly shifted through both shift registers and received
-  back at the microcontroller on the MISO pin.
-
-* Normally you would keep the /CS line high, only making it
-  active (low) when communicating with the chip(s). But in this
-  circuit, we have no other devices on the SPI, so we can let
-  the /CS signal idle in the active (low) state. Why?
-
-* Not only does the chip not have a read back ability, there is
-  no "pass through" possible to shift out the previous command.
-
-  - If /CS is high, the digital part of the chip is unresponsive.
-
-  - The /CS transition from low to high is that loads the shift
-    register values into the wiper control registers.
-
-* The solution, keep /CS low all the time. When you want to
-  write a value to the wipers, do the following:
-
-  - keep /CS low...
-  - shift in 20 (24) bits of new command values
-  - toggle /CS high then low, thus loading the wipers
-  - shift in 20 (24) bits of dummy data, and
-  - capture the loopbacked MISO data 
-  - the loopback data should match the commmanded data
-    (after compensating for the extra four bits shift due 
-    to the 20/24 bits issue)
-
-That's the best you can do without external analog resistance 
-monitoring hardware, or using a different kind of digital
-potentiometer. The approach used in this code keeps track of 
-current wiper values as follows:
-
-1. On power up, issue a reset to the chip. This puts it in a
-   known, mid-scale point according to the datasheet: 0x80 counts.
-
-2. We keep track of the status of the Digipots be shadowing the
-   command each time a new command is sent. This is kept in the class
-   instance variable, of type list, called `values`.
-
-"""
-
+import gc
+gc.collect()
 import binascii
+gc.collect()
 from machine import I2C, SPI, Pin, Signal
+gc.collect()
 import utime
+gc.collect()
 
 # Each Digipot has one 10-bit register, composed as follows:
 #   * 2-bits Address, [ A1, A0 ]  b9 -- b8
 #   * 8-bits Data,  [ D7 -- D0 ]  b7 -- b0
 
-R1 = 0
-R2 = 1
-CH1 = 0
-CH2 = 1
-CH3 = 2
-CH4 = 3
-CH_ALL = None
+#R1 = 0
+#R2 = 1
+#CH1 = 0
+#CH2 = 1
+#CH3 = 2
+#CH4 = 3
+#CH_ALL = None
 
 class Digipot:
 
@@ -102,37 +26,8 @@ class Digipot:
   RWA = 0xaaaa
   RWB = 0xbbbb
 
-  def __init__( self, nchans=4, rtotal=1000, rwiper=50 ): 
-    """Analog Devices AD840x Digipot Class
-
-    The Digipot class represents the values and provides calculations
-    related to the an AD840x digital potentiometer. Digipots in this 
-    family can have one, two, or four potentiometers in a single chip.
-
-      * AD8400 ==  1 pot
-      * AD8402 ==  2 pots
-      * AD8403 ==  4 pots
-
-    Each potentiometer has three terminals, A, B, and W (wiper).
-    The directional sense of resitance vs. counts is
-
-      * Value of 0x00:  R.WB = 0 ohms,  R.WA = Maximum
-      * Value of 0xFF:  R.WB = Maximum, R.WB = 0 ohms
-
-    Each of the three Digipots (single, dual, quad) are available 
-    with the following total resistances:
-
-      * 1 Kohm
-      * 10 Kohm
-      * 50 Kohm
-      * 100 Kohm
-
-    The formula for resistance vs counts is:
-
-      *  Rwb  = Rwiper + Rtotal * (counts / 256)
-      *  Rwa  = Rwiper + Rtotal * ((256 - counts) / 256)
-    """
-
+  def __init__( self, nchans=4, rtotal=1000, rwiper=50, chipid='' ): 
+    self.chipid = chipid
     self.Rtotal = rtotal
     self.Rwiper = rwiper
     self.nchans = nchans
@@ -145,18 +40,20 @@ class Digipot:
     # rwa and rwb stores the digipot resistances
     self.rwa = [0] * self.nchans
     self.rwb = [0] * self.nchans
+    self.cal = None # cal for current setting, when available
     self.ohms()  # populate the lists
     self.verbose = False
 
   def status(self):
-    #print( 'cmds:', ['0x'+hex(c)[2:].zfill(3) for c in self.cmds ] )
-    #print( 'vals:', ['0x'+hex(v)[2:].zfill(2) for v in self.vals ] )
-    print( 'cmds:', [hex(c) for c in self.cmds ] )
-    print( 'vals:', [hex(v) for v in self.vals ] )
-    print( 'vals:', self.vals )
-    print( 'ohms.Rwa:', self.rwa )
-    print( 'ohms.Rwb:', self.rwb )
-    print( 'combined:', self.Rcombine() )
+    print('status')
+    #### #print( 'cmds:', ['0x'+hex(c)[2:].zfill(3) for c in self.cmds ] )
+    #### #print( 'vals:', ['0x'+hex(v)[2:].zfill(2) for v in self.vals ] )
+    #### print( 'cmds:', [hex(c) for c in self.cmds ] )
+    #### print( 'vals:', [hex(v) for v in self.vals ] )
+    #### print( 'vals:', self.vals )
+    #### print( 'ohms.Rwa:', self.rwa )
+    #### print( 'ohms.Rwb:', self.rwb )
+    #### print( 'combined:', self.Rcombine() )
 
   def cmd_parse(self, cmd):
     """Extracts channel and wiper value from a 10-bit command."""
@@ -165,21 +62,6 @@ class Digipot:
     return 'w'+str(chan)+'.v'+str(value)
 
   def get_channel_list(self, channels):
-    """Utility function which handles parsing of the channel parameter.
-    
-    Allowed formats for specifying one or a group of channels:
-      * integer     single channel       e.g.:   1
-      * list        list of channels     e.g.:   [0,3] 
-      * #channels   all the channels     e.g.:   4
-      * None        all the channels
-    These three examples would evaluate to the following, respectively,
-    for quad Digipots:
-      * [ 1 ]
-      * [ 0, 3 ]
-      * [ 0, 1, 2, 3 ]
-      * [ 0, 1, 2, 3 ]
-    Channel values out of range are silently discarded
-    """
     clist = []
     if channels is None:
       clist = [ c for c in range(self.nchans) ]
@@ -193,12 +75,15 @@ class Digipot:
     # check the values, only return in-bounds ones
     return [ c for c in clist if c >= 0 and c < self.nchans ]
 
-  def counts(self, value, channels=None ):
+  def counts(self, values, channels=None ):
     """Sets wiper value(s) and 10-bit SPI command(s) for the reqested channels."""
+    if not isinstance( values, list ):
+      # only one value is given
+      values = [ values ] * self.nchans
     for chan in self.get_channel_list(channels):
       command = chan << 8
-      command += (value & 0xff)
-      self.vals[chan] = value
+      command += (values[chan] & 0xff)
+      self.vals[chan] = values[chan]
       self.cmds[chan] = command
     self.ohms() # update the resistances
     # temporary, show combined
@@ -224,51 +109,55 @@ class Digipot:
 
   def Rcombine(self, channels=None, 
                connection=PARALLEL, terminal=RWB):
-    """Combined ohms for specified channel(s), connection, and terminals."""
-    # This calculates all combinations of series and parallel connections
-    # on both possible terminal connections, Rwa and Rwb.
-    # At the end, it provides the requested answer.
-    # Could be modified to return multiple answers
-    # Only alows simple combinations, such as
-    #   N channels in parallel or series.
-    # Complicated connections like:
-    #   R1wa + ( R2wa || R3wa || R0wb )
-    # are not supported.
-    series_rwa = 0.0
-    series_rwb = 0.0
-    gwa = 0.0
-    gwb = 0.0
-    zero_wa = False
-    zero_wb = False
-    rlist_rwa = []
-    rlist_rwb = []
-    for chan in self.get_channel_list(channels):
-      rlist_rwa.extend( [ self.rwa[chan] ] )
-      rlist_rwb.extend( [ self.rwb[chan] ] )
-      series_rwa += self.rwa[chan]
-      series_rwb += self.rwb[chan]
-      if self.rwa[chan] == 0: zero_wa = True
-      else: gwa += 1.0 / self.rwa[chan]
-      if self.rwb[chan] == 0: zero_wb = True
-      else: gwb += 1.0 / self.rwb[chan]
-    if zero_wa: parallel_rwa = 0.0
-    else: parallel_rwa = 1.0 / gwa
-    if zero_wb: parallel_rwb = 0.0
-    else: parallel_rwb = 1.0 / gwb
+    return [ self.rwa[0]/4.0 ]
 
-    if self.verbose:
-      print( series_rwa, parallel_rwa, rlist_rwa )
-      print( series_rwb, parallel_rwb, rlist_rwb )
-
-    retval = []
-    if connection == self.PARALLEL:
-      if terminal == self.RWA: retval.extend( [ parallel_rwa ] )
-      if terminal == self.RWB: retval.extend( [ parallel_rwb ] )
-    if connection == self.SERIES:
-      if terminal == self.RWA: retval.extend( [ series_rwa ] )
-      if terminal == self.RWB: retval.extend( [ series_rwb ] )
-    return retval
-
+####   def Rcombine(self, channels=None, 
+####                connection=PARALLEL, terminal=RWB):
+####     """Combined ohms for specified channel(s), connection, and terminals."""
+####     # This calculates all combinations of series and parallel connections
+####     # on both possible terminal connections, Rwa and Rwb.
+####     # At the end, it provides the requested answer.
+####     # Could be modified to return multiple answers
+####     # Only alows simple combinations, such as
+####     #   N channels in parallel or series.
+####     # Complicated connections like:
+####     #   R1wa + ( R2wa || R3wa || R0wb )
+####     # are not supported.
+####     series_rwa = 0.0
+####     series_rwb = 0.0
+####     gwa = 0.0
+####     gwb = 0.0
+####     zero_wa = False
+####     zero_wb = False
+####     rlist_rwa = []
+####     rlist_rwb = []
+####     for chan in self.get_channel_list(channels):
+####       rlist_rwa.extend( [ self.rwa[chan] ] )
+####       rlist_rwb.extend( [ self.rwb[chan] ] )
+####       series_rwa += self.rwa[chan]
+####       series_rwb += self.rwb[chan]
+####       if self.rwa[chan] == 0: zero_wa = True
+####       else: gwa += 1.0 / self.rwa[chan]
+####       if self.rwb[chan] == 0: zero_wb = True
+####       else: gwb += 1.0 / self.rwb[chan]
+####     if zero_wa: parallel_rwa = 0.0
+####     else: parallel_rwa = 1.0 / gwa
+####     if zero_wb: parallel_rwb = 0.0
+####     else: parallel_rwb = 1.0 / gwb
+#### 
+####     #### if self.verbose:
+####     ####   print( series_rwa, parallel_rwa, rlist_rwa )
+####     ####   print( series_rwb, parallel_rwb, rlist_rwb )
+#### 
+####     retval = []
+####     if connection == self.PARALLEL:
+####       if terminal == self.RWA: retval.extend( [ parallel_rwa ] )
+####       if terminal == self.RWB: retval.extend( [ parallel_rwb ] )
+####     if connection == self.SERIES:
+####       if terminal == self.RWA: retval.extend( [ series_rwa ] )
+####       if terminal == self.RWB: retval.extend( [ series_rwb ] )
+####     return retval
+#### 
 
 
 

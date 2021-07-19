@@ -1,0 +1,30 @@
+TraceR serial command protocol
+
+Enter command at the "> " prompt.  Characters are echoed back.
+Errors echo exclamation "!" and parsing is terminated.
+
+Usage:
+
+  <cmd>[r#][op][val]<CR>
+
+where:
+   cmd   One of the following commands, case insensitive
+             Q       quits the program
+             X       digipot counts, 0 to 255
+             R       resistance, in ohms
+             K       relay, 0=open or 1=closed
+            <CR>     show status
+  r#     Which resistor, either 1 or 2
+  op     Operator
+             =       set value
+             ?       query value (optional)
+  val    Value to set, decimal
+            0-255    digipot counts
+            0,1      relay control, 0=open, 1=closed
+            0~300    resistance, ohms
+
+Reply format examples:
+   X1=128
+   K2=open
+
+
